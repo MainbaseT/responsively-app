@@ -14,7 +14,13 @@ import cli from './cli';
 import {PROTOCOL} from '../common/constants';
 import MenuBuilder from './menu';
 import {resolveHtmlPath} from './util';
-import {BROWSER_SYNC_HOST, initInstance, stopWatchFiles, watchFiles} from './browser-sync';
+import {
+  getBrowserSyncHost,
+  getBrowserSyncPort,
+  initInstance,
+  stopWatchFiles,
+  watchFiles,
+} from './browser-sync';
 import store from '../store';
 import {initWebviewContextMenu} from './webview-context-menu/register';
 import {initScreenshotHandlers} from './screenshot';
@@ -54,6 +60,13 @@ if (process.env.NODE_ENV === 'production') {
   sourceMapSupport.install();
 }
 
+// Suppress popups during E2E tests
+if (process.env.E2E_TEST === 'true') {
+  store.set('sponsorship.lastShown', Date.now());
+  const seenVersions = store.get('seenReleaseNotes') ?? [];
+  store.set('seenReleaseNotes', [...seenVersions, app.getVersion()]);
+}
+
 const isDebug = process.env.NODE_ENV === 'development' || process.env.DEBUG_PROD === 'true';
 
 if (isDebug) {
@@ -84,12 +97,15 @@ const installExtensions = async () => {
 const createWindow = async () => {
   windowShownOnOpen = false;
   let isAppInitiated = false;
-  await installExtensions();
+  if (process.env.E2E_TEST !== 'true') {
+    await installExtensions();
+  }
 
   const setIsAppInitiated = () => {
     isAppInitiated = true;
   };
 
+  const isBuiltApp = app.isPackaged || process.env.E2E_TEST === 'true';
   const RESOURCES_PATH = app.isPackaged
     ? path.join(process.resourcesPath, 'assets')
     : path.join(__dirname, '../../assets');
@@ -107,7 +123,7 @@ const createWindow = async () => {
     icon: getAssetPath('icon.png'),
     titleBarStyle: 'default',
     webPreferences: {
-      preload: app.isPackaged
+      preload: isBuiltApp
         ? path.join(__dirname, 'preload.js')
         : path.join(__dirname, '../../.erb/dll/preload.js'),
       webviewTag: true,
@@ -117,20 +133,21 @@ const createWindow = async () => {
   initHttpBasicAuthHandlers(mainWindow);
   const webPermissionHandlers = WebPermissionHandlers(mainWindow);
 
-  // Add BROWSER_SYNC_HOST to the allowed Content-Security-Policy origins
+  // Add BrowserSync host to the allowed Content-Security-Policy origins
   mainWindow.webContents.session.webRequest.onHeadersReceived(async (details, callback) => {
     if (details.responseHeaders?.['content-security-policy']) {
       let cspHeader = details.responseHeaders['content-security-policy'][0];
+      const bsHost = getBrowserSyncHost();
 
-      cspHeader = cspHeader.replace('default-src', `default-src ${BROWSER_SYNC_HOST}`);
-      cspHeader = cspHeader.replace('script-src', `script-src ${BROWSER_SYNC_HOST}`);
-      cspHeader = cspHeader.replace('script-src-elem', `script-src-elem ${BROWSER_SYNC_HOST}`);
+      cspHeader = cspHeader.replace('default-src', `default-src ${bsHost}`);
+      cspHeader = cspHeader.replace('script-src', `script-src ${bsHost}`);
+      cspHeader = cspHeader.replace('script-src-elem', `script-src-elem ${bsHost}`);
       cspHeader = cspHeader.replace(
         'connect-src',
-        `connect-src ${BROWSER_SYNC_HOST} wss://${BROWSER_SYNC_HOST} ws://${BROWSER_SYNC_HOST}`
+        `connect-src ${bsHost} wss://${bsHost} ws://${bsHost}`
       );
-      cspHeader = cspHeader.replace('child-src', `child-src ${BROWSER_SYNC_HOST}`);
-      cspHeader = cspHeader.replace('worker-src', `worker-src ${BROWSER_SYNC_HOST}`); // Required when/if the browser-sync script is eventually relocated to a web worker
+      cspHeader = cspHeader.replace('child-src', `child-src ${bsHost}`);
+      cspHeader = cspHeader.replace('worker-src', `worker-src ${bsHost}`); // Required when/if the browser-sync script is eventually relocated to a web worker
 
       details.responseHeaders['content-security-policy'][0] = cspHeader;
     }
@@ -176,6 +193,11 @@ const createWindow = async () => {
       webPermissionHandlers.init();
       if (process.env.START_MINIMIZED) {
         mainWindow.minimize();
+      } else if (process.env.E2E_TEST === 'true' && process.env.E2E_HEADLESS === 'true') {
+        windowShownOnOpen = true;
+      } else if (process.env.E2E_TEST === 'true') {
+        mainWindow.showInactive();
+        windowShownOnOpen = true;
       } else {
         mainWindow.showInactive();
         if (!windowShownOnOpen) {
@@ -206,6 +228,10 @@ const createWindow = async () => {
   mainWindow.webContents.setWindowOpenHandler((edata) => {
     shell.openExternal(edata.url);
     return {action: 'deny'};
+  });
+
+  ipcMain.on('get-browser-sync-port', (event) => {
+    event.returnValue = getBrowserSyncPort();
   });
 
   ipcMain.on('start-watching-file', async (event, fileInfo) => {
@@ -252,11 +278,11 @@ app.on('window-all-closed', () => {
 });
 
 app.on('certificate-error', (event, _, url, __, ___, callback) => {
-  if (url.indexOf(BROWSER_SYNC_HOST) !== -1) {
+  if (url.indexOf(getBrowserSyncHost()) !== -1) {
     event.preventDefault();
     return callback(true);
   }
-  console.log('certificate-error event', url, BROWSER_SYNC_HOST);
+  console.log('certificate-error event', url, getBrowserSyncHost());
   return callback(store.get('userPreferences.allowInsecureSSLConnections'));
 });
 
